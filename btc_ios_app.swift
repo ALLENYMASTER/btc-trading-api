@@ -22,8 +22,173 @@ class BTCTradingAPI: ObservableObject {
     @Published var news: [NewsItem] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var apiStatus: String = "Checking..."
+
+    // MARK: - 改進的請求方法，添加詳細日誌
+    private func performRequest<T: Decodable>(
+        endpoint: String,
+        type: T.Type,
+        completion: @escaping (T) -> Void
+    ) async {
+        // 構建 URL
+        guard let url = URL(string: "\(baseURL)\(endpoint)") else {
+            DispatchQueue.main.async {
+                self.errorMessage = "Invalid URL: \(self.baseURL)\(endpoint)"
+                print("❌ Invalid URL")
+            }
+            return
+        }
+        
+        print("📡 Requesting: \(url)")
+        
+        DispatchQueue.main.async {
+            self.isLoading = true
+            self.errorMessage = nil
+        }
+        
+        do {
+            // 設置請求
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 30  // 30秒超時
+            request.httpMethod = "GET"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            
+            // 發送請求
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            // 檢查響應
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
+            }
+            
+            print("📥 Response status: \(httpResponse.statusCode)")
+            
+            // 打印響應內容（調試用）
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("📄 Response: \(responseString.prefix(200))...")
+            }
+            
+            // 檢查狀態碼
+            guard (200...299).contains(httpResponse.statusCode) else {
+                // 嘗試解析錯誤訊息
+                if let errorDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let detail = errorDict["detail"] as? String {
+                    throw NSError(
+                        domain: "APIError",
+                        code: httpResponse.statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: detail]
+                    )
+                }
+                throw URLError(.badServerResponse)
+            }
+            
+            // 解碼數據
+            let decoded = try JSONDecoder().decode(T.self, from: data)
+            completion(decoded)
+            
+            DispatchQueue.main.async {
+                self.isLoading = false
+                self.apiStatus = "Connected ✓"
+                print("✅ Request successful")
+            }
+            
+        } catch let decodingError as DecodingError {
+            DispatchQueue.main.async {
+                self.isLoading = false
+                self.errorMessage = "Data format error: \(decodingError.localizedDescription)"
+                self.apiStatus = "Error ✗"
+                print("❌ Decoding error: \(decodingError)")
+            }
+        } catch let urlError as URLError {
+            DispatchQueue.main.async {
+                self.isLoading = false
+                
+                switch urlError.code {
+                case .notConnectedToInternet:
+                    self.errorMessage = "No internet connection"
+                case .timedOut:
+                    self.errorMessage = "Request timeout - Server may be starting up"
+                case .cannotFindHost:
+                    self.errorMessage = "Cannot find server. Check URL."
+                case .badServerResponse:
+                    self.errorMessage = "Server error. Try again in 2 minutes."
+                default:
+                    self.errorMessage = "Network error: \(urlError.localizedDescription)"
+                }
+                
+                self.apiStatus = "Disconnected ✗"
+                print("❌ URL Error: \(urlError.code) - \(urlError.localizedDescription)")
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.isLoading = false
+                self.errorMessage = error.localizedDescription
+                self.apiStatus = "Error ✗"
+                print("❌ Unknown error: \(error)")
+            }
+        }
+    }
+    
+    // MARK: - API Methods
+    
+    func checkConnection() async {
+        print("🔍 Checking API connection...")
+        await performRequest(endpoint: "/", type: HealthResponse.self) { response in
+            DispatchQueue.main.async {
+                self.apiStatus = response.status == "online" ? "Online ✓" : "Offline ✗"
+                print("✅ API Status: \(response.status)")
+                
+                // 如果模型未準備好，顯示訊息
+                if let modelReady = response.model_ready, !modelReady {
+                    self.errorMessage = "Model is initializing. Please wait 2-3 minutes."
+                }
+            }
+        }
+    }
+    
+    func fetchPrice() async {
+        print("💰 Fetching price...")
+        await performRequest(endpoint: "/price", type: PriceData.self) { data in
+            DispatchQueue.main.async {
+                self.currentPrice = data.price
+                self.priceChange24h = data.change_24h
+                print("✅ Price: $\(data.price)")
+            }
+        }
+    }
+    
+    func fetchSignal() async {
+        print("🎯 Fetching signal...")
+        await performRequest(endpoint: "/signal", type: TradingSignal.self) { signal in
+            DispatchQueue.main.async {
+                self.signal = signal
+                print("✅ Signal: \(signal.prediction) (\(signal.confidence * 100)%)")
+                
+                // 檢查是否是等待狀態
+                if signal.prediction == "WAIT" {
+                    self.errorMessage = signal.recommendation
+                }
+            }
+        }
+    }
+    
+    func fetchNews() async {
+        print("📰 Fetching news...")
+        await performRequest(endpoint: "/news?limit=10", type: [NewsItem].self) { news in
+            DispatchQueue.main.async {
+                self.news = news
+                print("✅ News count: \(news.count)")
+            }
+        }
+    }
     
     // MARK: - Data Models
+    
+    struct HealthResponse: Codable {
+        let status: String
+        let model_ready: Bool?
+        let model_training: Bool?
+    }
     
     struct PriceData: Codable {
         let price: Double
