@@ -43,6 +43,9 @@ analyzer = AdvancedSentimentAnalyzer()
 predictor = BTCPredictorWithPersistence(use_persistence=True)
 model_manager = ModelManager('models')
 
+model_ready = False
+model_training = False
+
 # Cache
 price_cache = {"timestamp": None, "data": None}
 signal_cache = {"timestamp": None, "data": None}
@@ -104,72 +107,91 @@ async def root():
         "status": "online",
         "service": "BTC Trading System API",
         "version": "1.0",
+        "model_ready": model_ready,
+        "model_training": model_training,
         "timestamp": datetime.now().isoformat()
     }
 
-@app.get("/price", response_model=PriceResponse)
+@app.get("/health")
+async def health_check():
+    """詳細健康檢查"""
+    return {
+        "status": "healthy",
+        "model_ready": model_ready,
+        "model_training": model_training,
+        "predictor_trained": predictor.is_trained
+    }
+
+@app.get("/price")
 async def get_current_price():
-    """Get current Bitcoin price"""
-    global price_cache
-    
-    # Check cache
-    now = datetime.now()
-    if price_cache["timestamp"] and \
-       (now - price_cache["timestamp"]).total_seconds() < CACHE_DURATION:
-        return price_cache["data"]
-    
-    # Fetch fresh data
     try:
         data = collector.get_current_price()
         if not data:
             raise HTTPException(status_code=503, detail="Price service unavailable")
         
-        response = PriceResponse(
-            price=data['price'],
-            change_24h=data['change_24h'],
-            timestamp=data['timestamp'].isoformat()
-        )
-        
-        # Update cache
-        price_cache = {"timestamp": now, "data": response}
-        return response
-        
+        return {
+            "price": data['price'],
+            "change_24h": data['change_24h'],
+            "timestamp": data['timestamp'].isoformat()
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.get("/signal", response_model=SignalResponse)
+@app.get("/signal")
 async def get_trading_signal():
-    """Get current trading signal"""
-    global signal_cache
+    global model_ready, model_training
     
-    # Check cache
-    now = datetime.now()
-    if signal_cache["timestamp"] and \
-       (now - signal_cache["timestamp"]).total_seconds() < CACHE_DURATION:
-        return signal_cache["data"]
+    if not model_ready and not predictor.is_trained:
+        if not model_training:
+            return {
+                "status": "model_not_ready",
+                "message": "Model is initializing. Please wait 2-3 minutes and try again.",
+                "prediction": "WAIT",
+                "confidence": 0.0,
+                "prob_up": 0.5,
+                "prob_down": 0.5,
+                "current_price": 0.0,
+                "sentiment": 0.0,
+                "events": 0,
+                "timestamp": datetime.now().isoformat(),
+                "recommendation": "WAIT - Model initializing"
+            }
+        else:
+            return {
+                "status": "model_training",
+                "message": "Model is currently training. Please wait.",
+                "prediction": "WAIT",
+                "confidence": 0.0,
+                "prob_up": 0.5,
+                "prob_down": 0.5,
+                "current_price": 0.0,
+                "sentiment": 0.0,
+                "events": 0,
+                "timestamp": datetime.now().isoformat(),
+                "recommendation": "WAIT - Training in progress"
+            }
     
     try:
-        # Ensure model is loaded
-        if not predictor.is_trained:
-            if not predictor.load_trained_model():
-                # Train if no model exists
-                await train_model_background()
-                if not predictor.is_trained:
-                    raise HTTPException(status_code=503, detail="Model not ready")
-        
-        # Get price
         price_data = collector.get_current_price()
         if not price_data:
             raise HTTPException(status_code=503, detail="Price unavailable")
         
-        # Get news sentiment
         news_df = collector.get_crypto_news(limit=20)
         if news_df.empty:
-            raise HTTPException(status_code=503, detail="News unavailable")
+            return {
+                "prediction": "NEUTRAL",
+                "confidence": 0.5,
+                "prob_up": 0.5,
+                "prob_down": 0.5,
+                "current_price": price_data['price'],
+                "sentiment": 0.0,
+                "events": 0,
+                "timestamp": datetime.now().isoformat(),
+                "recommendation": "WAIT - No news data"
+            }
         
         news_df = analyzer.process_news_batch(news_df)
         
-        # Build features
         features = {
             'polarity_mean': news_df['polarity'].mean(),
             'polarity_std': news_df['polarity'].std(),
@@ -180,8 +202,8 @@ async def get_trading_signal():
             'bearish_total': news_df['bearish_count'].sum(),
             'volatile_total': news_df['volatile_count'].sum(),
             'news_count': len(news_df),
-            'price_ma7': price_data['price'],  # Simplified
-            'price_volatility': 0,  # Would need price history
+            'price_ma7': price_data['price'],
+            'price_volatility': 0,
             'event_count_total': news_df['event_count'].sum(),
             'regulation_events': news_df['has_regulation'].sum(),
             'institutional_events': news_df['has_institutional'].sum(),
@@ -189,12 +211,10 @@ async def get_trading_signal():
             'price_action_mean': news_df['price_action_score'].mean()
         }
         
-        # Predict
         prediction = predictor.predict(features)
         if not prediction:
             raise HTTPException(status_code=500, detail="Prediction failed")
         
-        # Generate recommendation
         conf = prediction['confidence']
         if conf >= 0.70:
             rec = f"STRONG {prediction['prediction']}"
@@ -203,28 +223,24 @@ async def get_trading_signal():
         else:
             rec = "WAIT - Low confidence"
         
-        response = SignalResponse(
-            prediction=prediction['prediction'],
-            confidence=prediction['confidence'],
-            prob_up=prediction['prob_up'],
-            prob_down=prediction['prob_down'],
-            current_price=price_data['price'],
-            sentiment=features['polarity_mean'],
-            events=int(features['event_count_total']),
-            timestamp=datetime.now().isoformat(),
-            recommendation=rec
-        )
-        
-        # Cache
-        signal_cache = {"timestamp": now, "data": response}
-        return response
+        return {
+            "prediction": prediction['prediction'],
+            "confidence": prediction['confidence'],
+            "prob_up": prediction['prob_up'],
+            "prob_down": prediction['prob_down'],
+            "current_price": price_data['price'],
+            "sentiment": features['polarity_mean'],
+            "events": int(features['event_count_total']),
+            "timestamp": datetime.now().isoformat(),
+            "recommendation": rec
+        }
         
     except Exception as e:
+        print(f"Signal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/news", response_model=List[NewsItem])
+@app.get("/news")
 async def get_latest_news(limit: int = 10):
-    """Get latest analyzed news"""
     try:
         news_df = collector.get_crypto_news(limit=limit)
         if news_df.empty:
@@ -242,18 +258,19 @@ async def get_latest_news(limit: int = 10):
             if row['has_security']:
                 events.append("Security")
             
-            items.append(NewsItem(
-                title=row['title'],
-                sentiment=row['final_sentiment'],
-                published_at=row['published_at'].isoformat(),
-                source=row['source'],
-                events=events
-            ))
+            items.append({
+                "title": row['title'],
+                "sentiment": float(row['final_sentiment']),
+                "published_at": row['published_at'].isoformat(),
+                "source": row['source'],
+                "events": events
+            })
         
         return items
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"News error: {e}")
+        return []
 
 @app.get("/model/status", response_model=ModelStatus)
 async def get_model_status():
@@ -382,28 +399,53 @@ async def run_backtest(request: BacktestRequest):
 # ============================================================================
 # Server Startup
 # ============================================================================
+async def train_model_on_startup():
+    global model_ready, model_training
+    
+    try:
+        print("=" * 70)
+        print("🚀 Starting model initialization...")
+        print("=" * 70)
+        
+        model_training = True
+        
+        if predictor.load_trained_model():
+            print("✓ Model loaded from disk")
+            model_ready = True
+            model_training = False
+            return
+        
+        print("📊 Training new model...")
+        
+        news_df = collector.get_crypto_news(limit=100)
+        await asyncio.sleep(1)
+        price_df = collector.get_btc_price_history(days=60)
+        
+        news_df = analyzer.process_news_batch(news_df)
+        features_df = predictor.prepare_features(news_df, price_df)
+        
+        predictor.train(features_df, save_model=True)
+        
+        model_ready = True
+        model_training = False
+        
+        print("✓ Model training completed")
+        print("=" * 70)
+        
+    except Exception as e:
+        print(f"❌ Model training failed: {e}")
+        model_training = False
+        model_ready = False
 
 @app.on_event("startup")
 async def startup_event():
-    """Load model on startup"""
     print("=" * 70)
     print("🚀 BTC Trading API Server Starting...")
     print("=" * 70)
     
-    # Try to load existing model
-    if predictor.load_trained_model():
-        print("✓ Model loaded successfully")
-    else:
-        print("⚠️  No model found - will train on first request")
+    asyncio.create_task(train_model_on_startup())
     
-    print("\n📡 API Endpoints:")
-    print("  GET  /price       - Current BTC price")
-    print("  GET  /signal      - Trading signal")
-    print("  GET  /news        - Latest news")
-    print("  GET  /model/status - Model info")
-    print("  POST /model/train  - Train model")
-    print("  POST /backtest     - Run backtest")
-    print("\n✓ Server ready")
+    print("✓ Server ready (model initializing in background)")
     print("=" * 70)
 
 if __name__ == "__main__":
