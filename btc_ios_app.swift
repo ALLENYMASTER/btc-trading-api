@@ -8,7 +8,7 @@ class BTCTradingAPI: ObservableObject {
     // Change this to your server URL
     // For local testing: "http://localhost:8000"
     // For cloud: "https://your-server.com"
-    private let baseURL = "http://your-server.com"
+    private let baseURL = "https://web-production-dd9d.up.railway.app/"
     
     @Published var currentPrice: Double?
     @Published var priceChange24h: Double?
