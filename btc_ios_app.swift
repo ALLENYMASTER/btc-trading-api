@@ -1,4 +1,6 @@
 import SwiftUI
+import Foundation
+import Combine
 
 // ============================================================================
 // MARK: - API Client
@@ -9,6 +11,10 @@ class BTCTradingAPI: ObservableObject {
     // For local testing: "http://localhost:8000"
     // For cloud: "https://your-server.com"
     private let baseURL = "https://web-production-dd9d.up.railway.app/"
+
+    func backtestURL() -> URL? {
+        URL(string: "\(baseURL)/backtest")
+    }
     
     @Published var currentPrice: Double?
     @Published var priceChange24h: Double?
@@ -517,7 +523,7 @@ struct DetailedSignalCard: View {
             VStack(spacing: 15) {
                 DetailRow(label: "Prediction", value: signal.prediction)
                 DetailRow(label: "Confidence", value: "\(Int(signal.confidence * 100))%")
-                DetailRow(label: "Current Price", value: "$\(signal.current_price, specifier: "%.2f")")
+                DetailRow(label: "Current Price", value: "$\(signal.current_price, default: "%.2f")")
                 DetailRow(label: "Recommendation", value: signal.recommendation)
             }
         }
@@ -858,7 +864,7 @@ struct BacktestView: View {
         result = nil
         
         Task {
-            guard let url = URL(string: "\(api.baseURL)/backtest") else { return }
+            guard let url = api.backtestURL() else { return }
             
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
