@@ -6,7 +6,7 @@ import Combine
 // MARK: - API Client
 // ============================================================================
 class BTCTradingAPI: ObservableObject {
-    private let baseURL = "https://web-production-dd9d.up.railway.app/"
+    private let baseURL = "https://web-production-dd9d.up.railway.app"
 
     @Published var currentPrice: Double?
     @Published var priceChange24h: Double?
