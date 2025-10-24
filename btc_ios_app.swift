@@ -1,12 +1,13 @@
 import SwiftUI
 import Foundation
 import Combine
+import Charts
 
 // ============================================================================
 // MARK: - API Client
 // ============================================================================
 class BTCTradingAPI: ObservableObject {
-    private let baseURL = "https://web-production-dd9d.up.railway.app"
+    private let baseURL = "https://web-production-dd9d.up.railway.app/"
 
     @Published var currentPrice: Double?
     @Published var priceChange24h: Double?
@@ -70,6 +71,39 @@ class BTCTradingAPI: ObservableObject {
             let tp_hits: Int
         }
         
+        // MARK: - Signal History Persistence (Local Storage)
+        private let historyKey = "signalHistory"
+
+        @Published var signalHistory: [TradingSignal] = [] {
+            didSet {
+                saveSignalHistory()
+            }
+        }
+
+        // Save the last 10 signals to UserDefaults
+        private func saveSignalHistory() {
+            do {
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(signalHistory.prefix(10))
+                UserDefaults.standard.set(data, forKey: historyKey)
+            } catch {
+                print("❌ Failed to save signal history: \(error)")
+            }
+        }
+
+        // Load signals from UserDefaults when app starts
+        func loadSignalHistory() {
+            guard let data = UserDefaults.standard.data(forKey: historyKey) else { return }
+            do {
+                let decoder = JSONDecoder()
+                let history = try decoder.decode([TradingSignal].self, from: data)
+                self.signalHistory = history
+                print("✅ Restored \(history.count) signals from local storage")
+            } catch {
+                print("❌ Failed to load signal history: \(error)")
+            }
+        }
+
         // MARK: - API Methods
         
         func checkConnection() async {
@@ -97,19 +131,31 @@ class BTCTradingAPI: ObservableObject {
             }
         }
         
+        @Published var signalHistory: [TradingSignal] = []
+
         func fetchSignal() async {
             print("🎯 Fetching signal...")
             await performRequest(endpoint: "/signal", type: TradingSignal.self) { signal in
                 DispatchQueue.main.async {
                     self.signal = signal
                     print("✅ Signal: \(signal.prediction) (\(signal.confidence * 100)%)")
-                    
+
+                    // Insert new signal at top
+                    self.signalHistory.insert(signal, at: 0)
+                    if self.signalHistory.count > 10 {
+                        self.signalHistory = Array(self.signalHistory.prefix(10))
+                    }
+
+                    // Persist immediately
+                    self.saveSignalHistory()
+
                     if signal.prediction == "WAIT" {
                         self.errorMessage = signal.recommendation
                     }
                 }
             }
         }
+
         
         func fetchNews() async {
             print("📰 Fetching news...")
@@ -273,6 +319,11 @@ struct BTCTradingAppView: View {
                 .tag(3)
         }
         .accentColor(.orange)
+        .task {
+            api.loadSignalHistory()       
+            await api.fetchPrice()        
+            await api.fetchSignal()       
+        }
     }
 }
 
@@ -468,17 +519,19 @@ struct SignalSummaryCard: View {
     }
 }
 
-// MARK: - Quick Actions Card
+// MARK: - Quick Actions Card with Signal History and Chart
 
 struct QuickActionsCard: View {
     @ObservedObject var api: BTCTradingAPI
-    
+
     var body: some View {
         VStack(spacing: 15) {
+            // Header
             Text("Quick Actions")
                 .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            
+
+            // Action buttons
             HStack(spacing: 15) {
                 ActionButton(
                     title: "Refresh",
@@ -490,7 +543,7 @@ struct QuickActionsCard: View {
                         await api.fetchSignal()
                     }
                 }
-                
+
                 ActionButton(
                     title: "News",
                     icon: "newspaper",
@@ -500,7 +553,7 @@ struct QuickActionsCard: View {
                         await api.fetchNews()
                     }
                 }
-                
+
                 ActionButton(
                     title: "Train",
                     icon: "brain",
@@ -510,6 +563,38 @@ struct QuickActionsCard: View {
                         await api.trainModel()
                     }
                 }
+            }
+
+            Divider().padding(.vertical, 5)
+
+            // Chart (price + confidence)
+            if api.signalHistory.count >= 2 {
+                SignalHistoryChart(signals: api.signalHistory)
+            }
+
+            // Signal history list
+            if !api.signalHistory.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent 10 Trading Signal Predictions")
+                        .font(.headline)
+
+                    ForEach(api.signalHistory) { s in
+                        HStack {
+                            Text(s.timestamp.prefix(16))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(String(format: "$%.0f", s.current_price))
+                                .font(.caption)
+                            Text(s.prediction)
+                                .font(.caption)
+                                .fontWeight(.bold)
+                                .foregroundColor(s.prediction == "UP" ? .green : .red)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .padding(.top, 10)
             }
         }
         .padding()
@@ -539,6 +624,75 @@ struct ActionButton: View {
             .foregroundColor(color)
             .cornerRadius(10)
         }
+    }
+}
+
+// MARK: - Signal History Chart (Price + Confidence)
+struct SignalHistoryChart: View {
+    let signals: [BTCTradingAPI.TradingSignal]
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text("Price & Confidence Trend")
+                .font(.headline)
+            
+            Chart {
+                // Line for price
+                ForEach(signals) { s in
+                    LineMark(
+                        x: .value("Time", formattedDate(s.timestamp)),
+                        y: .value("Price", s.current_price)
+                    )
+                    .foregroundStyle(.blue)
+                    .lineStyle(StrokeStyle(lineWidth: 2))
+                    .interpolationMethod(.catmullRom)
+                }
+
+                // Line for confidence (scaled to 0–100%)
+                ForEach(signals) { s in
+                    LineMark(
+                        x: .value("Time", formattedDate(s.timestamp)),
+                        y: .value("Confidence (%)", s.confidence * 100)
+                    )
+                    .foregroundStyle(.orange)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4]))
+                    .interpolationMethod(.catmullRom)
+                    .symbol(Circle().strokeBorder(.orange, lineWidth: 1.5))
+                }
+
+                // Background zones for UP / DOWN
+                ForEach(signals) { s in
+                    RectangleMark(
+                        xStart: .value("Start", formattedDate(s.timestamp)),
+                        xEnd: .value("End", formattedDate(s.timestamp)),
+                        yStart: .value("Low", s.current_price * 0.98),
+                        yEnd: .value("High", s.current_price * 1.02)
+                    )
+                    .foregroundStyle(
+                        s.prediction == "UP"
+                        ? Color.green.opacity(0.12)
+                        : Color.red.opacity(0.12)
+                    )
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) {
+                    AxisGridLine()
+                    AxisValueLabel() // Left axis = price
+                }
+                AxisMarks(position: .trailing) {
+                    AxisGridLine()
+                    AxisValueLabel() // Right axis = confidence
+                }
+            }
+            .frame(height: 200)
+        }
+    }
+
+    // Helper to convert ISO8601 string to Date
+    private func formattedDate(_ isoString: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: isoString) ?? Date()
     }
 }
 
@@ -857,3 +1011,4 @@ struct BTCTradingAppView_Previews: PreviewProvider {
         BTCTradingAppView()
     }
 }
+
