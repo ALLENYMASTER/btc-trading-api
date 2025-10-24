@@ -1,0 +1,7 @@
+{
+  "accuracy": 1.0,
+  "train_samples": 101,
+  "features_used": 16,
+  "saved_at": "2025-10-21T12:30:15.974778",
+  "model_type": "RandomForestClassifier"
+}
