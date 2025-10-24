@@ -82,9 +82,10 @@ class BTCTradingAPI: ObservableObject {
 
         // Save the last 10 signals to UserDefaults
         private func saveSignalHistory() {
+            let encoder = JSONEncoder()
+            let arr = Array(signalHistory.prefix(10))     // <-- convert to Array to avoid compiler issue
             do {
-                let encoder = JSONEncoder()
-                let data = try encoder.encode(signalHistory.prefix(10))
+                let data = try encoder.encode(arr)
                 UserDefaults.standard.set(data, forKey: historyKey)
             } catch {
                 print("❌ Failed to save signal history: \(error)")
@@ -94,15 +95,19 @@ class BTCTradingAPI: ObservableObject {
         // Load signals from UserDefaults when app starts
         func loadSignalHistory() {
             guard let data = UserDefaults.standard.data(forKey: historyKey) else { return }
+            let decoder = JSONDecoder()
             do {
-                let decoder = JSONDecoder()
                 let history = try decoder.decode([TradingSignal].self, from: data)
-                self.signalHistory = history
-                print("✅ Restored \(history.count) signals from local storage")
+                // assign on main thread
+                DispatchQueue.main.async {
+                    self.signalHistory = history
+                    print("✅ Restored \(history.count) signals from local storage")
+                }
             } catch {
                 print("❌ Failed to load signal history: \(error)")
             }
         }
+
 
         // MARK: - API Methods
         
@@ -130,8 +135,6 @@ class BTCTradingAPI: ObservableObject {
                 }
             }
         }
-        
-        @Published var signalHistory: [TradingSignal] = []
 
         func fetchSignal() async {
             print("🎯 Fetching signal...")
@@ -146,8 +149,7 @@ class BTCTradingAPI: ObservableObject {
                         self.signalHistory = Array(self.signalHistory.prefix(10))
                     }
 
-                    // Persist immediately
-                    self.saveSignalHistory()
+                    // saveSignalHistory() will be triggered by didSet on signalHistory
 
                     if signal.prediction == "WAIT" {
                         self.errorMessage = signal.recommendation
@@ -155,6 +157,7 @@ class BTCTradingAPI: ObservableObject {
                 }
             }
         }
+
 
         
         func fetchNews() async {
@@ -285,7 +288,6 @@ class BTCTradingAPI: ObservableObject {
         }
     }
 
-
 // MARK: - Main App View
 
 struct BTCTradingAppView: View {
@@ -320,9 +322,9 @@ struct BTCTradingAppView: View {
         }
         .accentColor(.orange)
         .task {
-            api.loadSignalHistory()       
-            await api.fetchPrice()        
-            await api.fetchSignal()       
+            api.loadSignalHistory()
+            await api.fetchPrice()
+            await api.fetchSignal()
         }
     }
 }
@@ -519,8 +521,7 @@ struct SignalSummaryCard: View {
     }
 }
 
-// MARK: - Quick Actions Card with Signal History and Chart
-
+// MARK: - Quick Actions Card (unchanged behavioral buttons, chart below)
 struct QuickActionsCard: View {
     @ObservedObject var api: BTCTradingAPI
 
@@ -531,34 +532,22 @@ struct QuickActionsCard: View {
                 .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Action buttons
+            // Action buttons (same as before)
             HStack(spacing: 15) {
-                ActionButton(
-                    title: "Refresh",
-                    icon: "arrow.clockwise",
-                    color: .blue
-                ) {
+                ActionButton(title: "Refresh", icon: "arrow.clockwise", color: .blue) {
                     Task {
                         await api.fetchPrice()
                         await api.fetchSignal()
                     }
                 }
 
-                ActionButton(
-                    title: "News",
-                    icon: "newspaper",
-                    color: .orange
-                ) {
+                ActionButton(title: "News", icon: "newspaper", color: .orange) {
                     Task {
                         await api.fetchNews()
                     }
                 }
 
-                ActionButton(
-                    title: "Train",
-                    icon: "brain",
-                    color: .purple
-                ) {
+                ActionButton(title: "Train", icon: "brain", color: .purple) {
                     Task {
                         await api.trainModel()
                     }
@@ -567,7 +556,7 @@ struct QuickActionsCard: View {
 
             Divider().padding(.vertical, 5)
 
-            // Chart (price + confidence)
+            // Chart + confidence series (uses the stable SignalHistoryChart below)
             if api.signalHistory.count >= 2 {
                 SignalHistoryChart(signals: api.signalHistory)
             }
@@ -604,6 +593,7 @@ struct QuickActionsCard: View {
     }
 }
 
+
 struct ActionButton: View {
     let title: String
     let icon: String
@@ -627,72 +617,79 @@ struct ActionButton: View {
     }
 }
 
-// MARK: - Signal History Chart (Price + Confidence)
+// MARK: - Signal History Chart (stable)
 struct SignalHistoryChart: View {
     let signals: [BTCTradingAPI.TradingSignal]
 
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text("Price & Confidence Trend")
-                .font(.headline)
-            
-            Chart {
-                // Line for price
-                ForEach(signals) { s in
-                    LineMark(
-                        x: .value("Time", formattedDate(s.timestamp)),
-                        y: .value("Price", s.current_price)
-                    )
-                    .foregroundStyle(.blue)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-                    .interpolationMethod(.catmullRom)
-                }
-
-                // Line for confidence (scaled to 0–100%)
-                ForEach(signals) { s in
-                    LineMark(
-                        x: .value("Time", formattedDate(s.timestamp)),
-                        y: .value("Confidence (%)", s.confidence * 100)
-                    )
-                    .foregroundStyle(.orange)
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4]))
-                    .interpolationMethod(.catmullRom)
-                    .symbol(Circle().strokeBorder(.orange, lineWidth: 1.5))
-                }
-
-                // Background zones for UP / DOWN
-                ForEach(signals) { s in
-                    RectangleMark(
-                        xStart: .value("Start", formattedDate(s.timestamp)),
-                        xEnd: .value("End", formattedDate(s.timestamp)),
-                        yStart: .value("Low", s.current_price * 0.98),
-                        yEnd: .value("High", s.current_price * 1.02)
-                    )
-                    .foregroundStyle(
-                        s.prediction == "UP"
-                        ? Color.green.opacity(0.12)
-                        : Color.red.opacity(0.12)
-                    )
-                }
-            }
-            .chartYAxis {
-                AxisMarks(position: .leading) {
-                    AxisGridLine()
-                    AxisValueLabel() // Left axis = price
-                }
-                AxisMarks(position: .trailing) {
-                    AxisGridLine()
-                    AxisValueLabel() // Right axis = confidence
-                }
-            }
-            .frame(height: 200)
-        }
+    // small typed struct for chart-friendly data
+    struct Point: Identifiable {
+        let id = UUID()
+        let date: Date
+        let price: Double
+        let confidencePct: Double
+        let prediction: String
     }
 
-    // Helper to convert ISO8601 string to Date
-    private func formattedDate(_ isoString: String) -> Date {
-        let formatter = ISO8601DateFormatter()
-        return formatter.date(from: isoString) ?? Date()
+    var points: [Point] {
+        let iso = ISO8601DateFormatter()
+        return signals.compactMap { s in
+            guard let d = iso.date(from: s.timestamp) else { return nil }
+            return Point(date: d, price: s.current_price, confidencePct: s.confidence * 100, prediction: s.prediction)
+        }.reversed() // oldest → newest for nicer chart ordering
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Price & Confidence Trend")
+                .font(.headline)
+
+            if points.count < 2 {
+                Text("Not enough data for chart")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Chart {
+                    // Price line
+                    ForEach(points) { p in
+                        LineMark(
+                            x: .value("Time", p.date),
+                            y: .value("Price", p.price)
+                        )
+                        .interpolationMethod(.catmullRom)
+                    }
+
+                    // Confidence dashed line (shares same numeric scale; shown as second series)
+                    ForEach(points) { p in
+                        LineMark(
+                            x: .value("Time", p.date),
+                            y: .value("Confidence", p.confidencePct)
+                        )
+                        .interpolationMethod(.catmullRom)
+                        .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [4]))
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4))
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading)
+                }
+                .frame(height: 180)
+
+                // Prediction color strip under chart — simple and reliable
+                GeometryReader { geo in
+                    HStack(spacing: 0) {
+                        ForEach(points) { p in
+                            Rectangle()
+                                .fill(p.prediction == "UP" ? Color.green.opacity(0.12) : Color.red.opacity(0.12))
+                                .frame(width: max(1, geo.size.width / CGFloat(points.count)))
+                        }
+                    }
+                }
+                .frame(height: 12)
+                .cornerRadius(4)
+            }
+        }
     }
 }
 
@@ -1011,4 +1008,5 @@ struct BTCTradingAppView_Previews: PreviewProvider {
         BTCTradingAppView()
     }
 }
+
 
