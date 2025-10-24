@@ -5,17 +5,9 @@ import Combine
 // ============================================================================
 // MARK: - API Client
 // ============================================================================
-
 class BTCTradingAPI: ObservableObject {
-    // Change this to your server URL
-    // For local testing: "http://localhost:8000"
-    // For cloud: "https://your-server.com"
     private let baseURL = "https://web-production-dd9d.up.railway.app/"
 
-    func backtestURL() -> URL? {
-        URL(string: "\(baseURL)/backtest")
-    }
-    
     @Published var currentPrice: Double?
     @Published var priceChange24h: Double?
     @Published var signal: TradingSignal?
@@ -24,307 +16,231 @@ class BTCTradingAPI: ObservableObject {
     @Published var errorMessage: String?
     @Published var apiStatus: String = "Checking..."
 
-    // MARK: - 改進的請求方法，添加詳細日誌
-    private func performRequest<T: Decodable>(
-        endpoint: String,
-        type: T.Type,
-        completion: @escaping (T) -> Void
-    ) async {
-        // 構建 URL
-        guard let url = URL(string: "\(baseURL)\(endpoint)") else {
-            DispatchQueue.main.async {
-                self.errorMessage = "Invalid URL: \(self.baseURL)\(endpoint)"
-                print("❌ Invalid URL")
-            }
-            return
-        }
-        
-        print("📡 Requesting: \(url)")
-        
-        DispatchQueue.main.async {
-            self.isLoading = true
-            self.errorMessage = nil
-        }
-        
-        do {
-            // 設置請求
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 30  // 30秒超時
-            request.httpMethod = "GET"
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            
-            // 發送請求
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            // 檢查響應
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw URLError(.badServerResponse)
-            }
-            
-            print("📥 Response status: \(httpResponse.statusCode)")
-            
-            // 打印響應內容（調試用）
-            if let responseString = String(data: data, encoding: .utf8) {
-                print("📄 Response: \(responseString.prefix(200))...")
-            }
-            
-            // 檢查狀態碼
-            guard (200...299).contains(httpResponse.statusCode) else {
-                // 嘗試解析錯誤訊息
-                if let errorDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let detail = errorDict["detail"] as? String {
-                    throw NSError(
-                        domain: "APIError",
-                        code: httpResponse.statusCode,
-                        userInfo: [NSLocalizedDescriptionKey: detail]
-                    )
-                }
-                throw URLError(.badServerResponse)
-            }
-            
-            // 解碼數據
-            let decoded = try JSONDecoder().decode(T.self, from: data)
-            completion(decoded)
-            
-            DispatchQueue.main.async {
-                self.isLoading = false
-                self.apiStatus = "Connected ✓"
-                print("✅ Request successful")
-            }
-            
-        } catch let decodingError as DecodingError {
-            DispatchQueue.main.async {
-                self.isLoading = false
-                self.errorMessage = "Data format error: \(decodingError.localizedDescription)"
-                self.apiStatus = "Error ✗"
-                print("❌ Decoding error: \(decodingError)")
-            }
-        } catch let urlError as URLError {
-            DispatchQueue.main.async {
-                self.isLoading = false
-                
-                switch urlError.code {
-                case .notConnectedToInternet:
-                    self.errorMessage = "No internet connection"
-                case .timedOut:
-                    self.errorMessage = "Request timeout - Server may be starting up"
-                case .cannotFindHost:
-                    self.errorMessage = "Cannot find server. Check URL."
-                case .badServerResponse:
-                    self.errorMessage = "Server error. Try again in 2 minutes."
-                default:
-                    self.errorMessage = "Network error: \(urlError.localizedDescription)"
-                }
-                
-                self.apiStatus = "Disconnected ✗"
-                print("❌ URL Error: \(urlError.code) - \(urlError.localizedDescription)")
-            }
-        } catch {
-            DispatchQueue.main.async {
-                self.isLoading = false
-                self.errorMessage = error.localizedDescription
-                self.apiStatus = "Error ✗"
-                print("❌ Unknown error: \(error)")
-            }
-        }
-    }
-    
-    // MARK: - API Methods
-    
-    func checkConnection() async {
-        print("🔍 Checking API connection...")
-        await performRequest(endpoint: "/", type: HealthResponse.self) { response in
-            DispatchQueue.main.async {
-                self.apiStatus = response.status == "online" ? "Online ✓" : "Offline ✗"
-                print("✅ API Status: \(response.status)")
-                
-                // 如果模型未準備好，顯示訊息
-                if let modelReady = response.model_ready, !modelReady {
-                    self.errorMessage = "Model is initializing. Please wait 2-3 minutes."
-                }
-            }
-        }
-    }
-    
-    func fetchPrice() async {
-        print("💰 Fetching price...")
-        await performRequest(endpoint: "/price", type: PriceData.self) { data in
-            DispatchQueue.main.async {
-                self.currentPrice = data.price
-                self.priceChange24h = data.change_24h
-                print("✅ Price: $\(data.price)")
-            }
-        }
-    }
-    
-    func fetchSignal() async {
-        print("🎯 Fetching signal...")
-        await performRequest(endpoint: "/signal", type: TradingSignal.self) { signal in
-            DispatchQueue.main.async {
-                self.signal = signal
-                print("✅ Signal: \(signal.prediction) (\(signal.confidence * 100)%)")
-                
-                // 檢查是否是等待狀態
-                if signal.prediction == "WAIT" {
-                    self.errorMessage = signal.recommendation
-                }
-            }
-        }
-    }
-    
-    func fetchNews() async {
-        print("📰 Fetching news...")
-        await performRequest(endpoint: "/news?limit=10", type: [NewsItem].self) { news in
-            DispatchQueue.main.async {
-                self.news = news
-                print("✅ News count: \(news.count)")
-            }
-        }
-    }
-    
     // MARK: - Data Models
-    
-    struct HealthResponse: Codable {
-        let status: String
-        let model_ready: Bool?
-        let model_training: Bool?
-    }
-    
-    struct PriceData: Codable {
-        let price: Double
-        let change_24h: Double
-        let timestamp: String
-    }
-    
-    struct TradingSignal: Codable, Identifiable {
-        var id = UUID()
-        let prediction: String
-        let confidence: Double
-        let prob_up: Double
-        let prob_down: Double
-        let current_price: Double
-        let sentiment: Double
-        let events: Int
-        let timestamp: String
-        let recommendation: String
         
-        enum CodingKeys: String, CodingKey {
-            case prediction, confidence, prob_up, prob_down
-            case current_price, sentiment, events, timestamp, recommendation
+        struct HealthResponse: Codable {
+            let status: String
+            let model_ready: Bool?
+            let model_training: Bool?
         }
-    }
-    
-    struct NewsItem: Codable, Identifiable {
-        var id = UUID()
-        let title: String
-        let sentiment: Double
-        let published_at: String
-        let source: String
-        let events: [String]
         
-        enum CodingKeys: String, CodingKey {
-            case title, sentiment, published_at, source, events
+        struct PriceData: Codable {
+            let price: Double
+            let change_24h: Double
+            let timestamp: String
         }
-    }
-    
-    struct BacktestResult: Codable {
-        let total_return: Double
-        let win_rate: Double
-        let total_trades: Int
-        let final_capital: Double
-        let sl_hits: Int
-        let tp_hits: Int
-    }
-    
-    // MARK: - API Methods
-    
-    func fetchPrice() async {
-        await performRequest(endpoint: "/price", type: PriceData.self) { data in
-            DispatchQueue.main.async {
-                self.currentPrice = data.price
-                self.priceChange24h = data.change_24h
+        
+        struct TradingSignal: Codable, Identifiable {
+            var id = UUID()
+            let prediction: String
+            let confidence: Double
+            let prob_up: Double
+            let prob_down: Double
+            let current_price: Double
+            let sentiment: Double
+            let events: Int
+            let timestamp: String
+            let recommendation: String
+            
+            enum CodingKeys: String, CodingKey {
+                case prediction, confidence, prob_up, prob_down
+                case current_price, sentiment, events, timestamp, recommendation
             }
         }
-    }
-    
-    func fetchSignal() async {
-        await performRequest(endpoint: "/signal", type: TradingSignal.self) { signal in
-            DispatchQueue.main.async {
-                self.signal = signal
-            }
-        }
-    }
-    
-    func fetchNews() async {
-        await performRequest(endpoint: "/news?limit=10", type: [NewsItem].self) { news in
-            DispatchQueue.main.async {
-                self.news = news
-            }
-        }
-    }
-    
-    func trainModel() async {
-        guard let url = URL(string: "\(baseURL)/model/train") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
         
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+        struct NewsItem: Codable, Identifiable {
+            var id = UUID()
+            let title: String
+            let sentiment: Double
+            let published_at: String
+            let source: String
+            let events: [String]
+            
+            enum CodingKeys: String, CodingKey {
+                case title, sentiment, published_at, source, events
+            }
+        }
+        
+        struct BacktestResult: Codable {
+            let total_return: Double
+            let win_rate: Double
+            let total_trades: Int
+            let final_capital: Double
+            let sl_hits: Int
+            let tp_hits: Int
+        }
+        
+        // MARK: - API Methods
+        
+        func checkConnection() async {
+            print("🔍 Checking API connection...")
+            await performRequest(endpoint: "/", type: HealthResponse.self) { response in
                 DispatchQueue.main.async {
-                    self.errorMessage = "Model training started"
+                    self.apiStatus = response.status == "online" ? "Online ✓" : "Offline ✗"
+                    print("✅ API Status: \(response.status)")
+                    
+                    if let modelReady = response.model_ready, !modelReady {
+                        self.errorMessage = "Model is initializing. Please wait 2-3 minutes."
+                    }
                 }
             }
-        } catch {
+        }
+        
+        func fetchPrice() async {
+            print("💰 Fetching price...")
+            await performRequest(endpoint: "/price", type: PriceData.self) { data in
+                DispatchQueue.main.async {
+                    self.currentPrice = data.price
+                    self.priceChange24h = data.change_24h
+                    print("✅ Price: $\(data.price)")
+                }
+            }
+        }
+        
+        func fetchSignal() async {
+            print("🎯 Fetching signal...")
+            await performRequest(endpoint: "/signal", type: TradingSignal.self) { signal in
+                DispatchQueue.main.async {
+                    self.signal = signal
+                    print("✅ Signal: \(signal.prediction) (\(signal.confidence * 100)%)")
+                    
+                    if signal.prediction == "WAIT" {
+                        self.errorMessage = signal.recommendation
+                    }
+                }
+            }
+        }
+        
+        func fetchNews() async {
+            print("📰 Fetching news...")
+            await performRequest(endpoint: "/news?limit=10", type: [NewsItem].self) { news in
+                DispatchQueue.main.async {
+                    self.news = news
+                    print("✅ News count: \(news.count)")
+                }
+            }
+        }
+        
+        func trainModel() async {
+            guard let url = URL(string: "\(baseURL)/model/train") else { return }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    DispatchQueue.main.async {
+                        self.errorMessage = "Model training started"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = "Training failed: \(error.localizedDescription)"
+                }
+            }
+        }
+        
+        // MARK: - Private Helper
+        
+        private func performRequest<T: Decodable>(
+            endpoint: String,
+            type: T.Type,
+            completion: @escaping (T) -> Void
+        ) async {
+            guard let url = URL(string: "\(baseURL)\(endpoint)") else {
+                DispatchQueue.main.async {
+                    self.errorMessage = "Invalid URL: \(self.baseURL)\(endpoint)"
+                    print("❌ Invalid URL")
+                }
+                return
+            }
+            
+            print("📡 Requesting: \(url)")
+            
             DispatchQueue.main.async {
-                self.errorMessage = "Training failed: \(error.localizedDescription)"
+                self.isLoading = true
+                self.errorMessage = nil
+            }
+            
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 30
+                request.httpMethod = "GET"
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                
+                let (data, response) = try await URLSession.shared.data(for: request)
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw URLError(.badServerResponse)
+                }
+                
+                print("📥 Response status: \(httpResponse.statusCode)")
+                
+                if let responseString = String(data: data, encoding: .utf8) {
+                    print("📄 Response: \(responseString.prefix(200))...")
+                }
+                
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    if let errorDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let detail = errorDict["detail"] as? String {
+                        throw NSError(
+                            domain: "APIError",
+                            code: httpResponse.statusCode,
+                            userInfo: [NSLocalizedDescriptionKey: detail]
+                        )
+                    }
+                    throw URLError(.badServerResponse)
+                }
+                
+                let decoded = try JSONDecoder().decode(T.self, from: data)
+                completion(decoded)
+                
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.apiStatus = "Connected ✓"
+                    print("✅ Request successful")
+                }
+                
+            } catch let decodingError as DecodingError {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.errorMessage = "Data format error: \(decodingError.localizedDescription)"
+                    self.apiStatus = "Error ✗"
+                    print("❌ Decoding error: \(decodingError)")
+                }
+            } catch let urlError as URLError {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    
+                    switch urlError.code {
+                    case .notConnectedToInternet:
+                        self.errorMessage = "No internet connection"
+                    case .timedOut:
+                        self.errorMessage = "Request timeout - Server may be starting up"
+                    case .cannotFindHost:
+                        self.errorMessage = "Cannot find server. Check URL."
+                    case .badServerResponse:
+                        self.errorMessage = "Server error. Try again in 2 minutes."
+                    default:
+                        self.errorMessage = "Network error: \(urlError.localizedDescription)"
+                    }
+                    
+                    self.apiStatus = "Disconnected ✗"
+                    print("❌ URL Error: \(urlError.code) - \(urlError.localizedDescription)")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
+                    self.apiStatus = "Error ✗"
+                    print("❌ Unknown error: \(error)")
+                }
             }
         }
     }
-    
-    private func performRequest<T: Decodable>(
-        endpoint: String,
-        type: T.Type,
-        completion: @escaping (T) -> Void
-    ) async {
-        guard let url = URL(string: "\(baseURL)\(endpoint)") else {
-            DispatchQueue.main.async {
-                self.errorMessage = "Invalid URL"
-            }
-            return
-        }
-        
-        DispatchQueue.main.async {
-            self.isLoading = true
-            self.errorMessage = nil
-        }
-        
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                throw URLError(.badServerResponse)
-            }
-            
-            let decoded = try JSONDecoder().decode(T.self, from: data)
-            completion(decoded)
-            
-            DispatchQueue.main.async {
-                self.isLoading = false
-            }
-        } catch {
-            DispatchQueue.main.async {
-                self.isLoading = false
-                self.errorMessage = error.localizedDescription
-            }
-        }
-    }
-}
 
-// ============================================================================
+
 // MARK: - Main App View
-// ============================================================================
 
 struct BTCTradingAppView: View {
     @StateObject private var api = BTCTradingAPI()
@@ -360,9 +276,7 @@ struct BTCTradingAppView: View {
     }
 }
 
-// ============================================================================
 // MARK: - Dashboard View
-// ============================================================================
 
 struct DashboardView: View {
     @ObservedObject var api: BTCTradingAPI
@@ -373,21 +287,17 @@ struct DashboardView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Price Card
                     PriceCard(
                         price: api.currentPrice,
                         change: api.priceChange24h
                     )
                     
-                    // Signal Summary Card
                     if let signal = api.signal {
                         SignalSummaryCard(signal: signal)
                     }
                     
-                    // Quick Actions
                     QuickActionsCard(api: api)
                     
-                    // Error Message
                     if let error = api.errorMessage {
                         Text(error)
                             .foregroundColor(.red)
@@ -400,14 +310,20 @@ struct DashboardView: View {
             .navigationTitle("BTC Trading")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { Task { await refreshAll() } }) {
+                    Button(action: {
+                        Task {
+                            await refreshAll()
+                        }
+                    }) {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
             }
             .onReceive(timer) { _ in
                 if autoRefresh {
-                    Task { await refreshAll() }
+                    Task {
+                        await refreshAll()
+                    }
                 }
             }
         }
@@ -416,15 +332,13 @@ struct DashboardView: View {
         }
     }
     
-    func refreshAll() async {
+    private func refreshAll() async {
         await api.fetchPrice()
         await api.fetchSignal()
     }
 }
 
-// ============================================================================
 // MARK: - Price Card
-// ============================================================================
 
 struct PriceCard: View {
     let price: Double?
@@ -463,9 +377,7 @@ struct PriceCard: View {
     }
 }
 
-// ============================================================================
 // MARK: - Signal Summary Card
-// ============================================================================
 
 struct SignalSummaryCard: View {
     let signal: BTCTradingAPI.TradingSignal
@@ -513,7 +425,6 @@ struct SignalSummaryCard: View {
                 }
             }
             
-            // Probability Bar
             HStack(spacing: 5) {
                 GeometryReader { geometry in
                     HStack(spacing: 0) {
@@ -557,9 +468,7 @@ struct SignalSummaryCard: View {
     }
 }
 
-// ============================================================================
 // MARK: - Quick Actions Card
-// ============================================================================
 
 struct QuickActionsCard: View {
     @ObservedObject var api: BTCTradingAPI
@@ -633,27 +542,25 @@ struct ActionButton: View {
     }
 }
 
-// ============================================================================
 // MARK: - Signal View
-// ============================================================================
 
 struct SignalView: View {
     @ObservedObject var api: BTCTradingAPI
     
     var body: some View {
         NavigationView {
-            ScrollView {
+            Group {
                 if let signal = api.signal {
-                    VStack(spacing: 20) {
-                        DetailedSignalCard(signal: signal)
-                        
-                        // Sentiment Analysis
-                        SentimentCard(
-                            sentiment: signal.sentiment,
-                            events: signal.events
-                        )
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            DetailedSignalCard(signal: signal)
+                            SentimentCard(
+                                sentiment: signal.sentiment,
+                                events: signal.events
+                            )
+                        }
+                        .padding()
                     }
-                    .padding()
                 } else if api.isLoading {
                     ProgressView()
                 } else {
@@ -664,7 +571,11 @@ struct SignalView: View {
             .navigationTitle("Trading Signal")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { Task { await api.fetchSignal() } }) {
+                    Button(action: {
+                        Task {
+                            await api.fetchSignal()
+                        }
+                    }) {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
@@ -746,7 +657,6 @@ struct SentimentCard: View {
                 }
             }
             
-            // Sentiment bar
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     Rectangle()
@@ -775,9 +685,7 @@ struct SentimentCard: View {
     }
 }
 
-// ============================================================================
 // MARK: - News View
-// ============================================================================
 
 struct NewsView: View {
     @ObservedObject var api: BTCTradingAPI
@@ -791,7 +699,11 @@ struct NewsView: View {
             .navigationTitle("Latest News")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { Task { await api.fetchNews() } }) {
+                    Button(action: {
+                        Task {
+                            await api.fetchNews()
+                        }
+                    }) {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
@@ -813,7 +725,6 @@ struct NewsRowView: View {
                 .lineLimit(2)
             
             HStack {
-                // Sentiment indicator
                 HStack(spacing: 4) {
                     Circle()
                         .fill(sentimentColor)
@@ -825,7 +736,6 @@ struct NewsRowView: View {
                 
                 Spacer()
                 
-                // Events badges
                 ForEach(article.events, id: \.self) { event in
                     Text(event)
                         .font(.caption2)
@@ -883,34 +793,23 @@ struct NewsRowView: View {
     }
 }
 
-// ============================================================================
 // MARK: - Settings View
-// ============================================================================
 
 struct SettingsView: View {
     @ObservedObject var api: BTCTradingAPI
-    @State private var showingBacktest = false
-    @State private var backtestDays = 30
-    @State private var backtestResult: BTCTradingAPI.BacktestResult?
-    @State private var isBacktesting = false
     
     var body: some View {
         NavigationView {
             Form {
                 Section(header: Text("Model")) {
                     Button(action: {
-                        Task { await api.trainModel() }
+                        Task {
+                            await api.trainModel()
+                        }
                     }) {
                         HStack {
                             Image(systemName: "brain")
                             Text("Retrain Model")
-                        }
-                    }
-                    
-                    Button(action: { showingBacktest = true }) {
-                        HStack {
-                            Image(systemName: "chart.bar")
-                            Text("Run Backtest")
                         }
                     }
                 }
@@ -947,181 +846,11 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .sheet(isPresented: $showingBacktest) {
-                BacktestView(
-                    days: $backtestDays,
-                    result: $backtestResult,
-                    isBacktesting: $isBacktesting,
-                    api: api
-                )
-            }
         }
     }
 }
 
-// ============================================================================
-// MARK: - Backtest View
-// ============================================================================
-
-struct BacktestView: View {
-    @Environment(\.dismiss) var dismiss
-    @Binding var days: Int
-    @Binding var result: BTCTradingAPI.BacktestResult?
-    @Binding var isBacktesting: Bool
-    @ObservedObject var api: BTCTradingAPI
-    
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                if isBacktesting {
-                    ProgressView("Running backtest...")
-                        .padding()
-                } else if let result = result {
-                    ScrollView {
-                        VStack(spacing: 20) {
-                            BacktestResultCard(result: result)
-                        }
-                        .padding()
-                    }
-                } else {
-                    VStack(spacing: 20) {
-                        Text("Backtest Configuration")
-                            .font(.title2)
-                            .fontWeight(.bold)
-                        
-                        VStack(alignment: .leading) {
-                            Text("Days: \(days)")
-                                .font(.headline)
-                            Slider(value: Binding(
-                                get: { Double(days) },
-                                set: { days = Int($0) }
-                            ), in: 7...90, step: 1)
-                        }
-                        .padding()
-                        
-                        Button(action: runBacktest) {
-                            Text("Run Backtest")
-                                .fontWeight(.semibold)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.blue)
-                                .foregroundColor(.white)
-                                .cornerRadius(10)
-                        }
-                        .padding(.horizontal)
-                    }
-                }
-                
-                Spacer()
-            }
-            .navigationTitle("Backtest")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-    }
-    
-    func runBacktest() {
-        isBacktesting = true
-        result = nil
-        
-        Task {
-            guard let url = api.backtestURL() else { return }
-            
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            let body = ["days": days, "initial_capital": 10000] as [String : Any]
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            
-            do {
-                let (data, _) = try await URLSession.shared.data(for: request)
-                let decoded = try JSONDecoder().decode(BTCTradingAPI.BacktestResult.self, from: data)
-                
-                DispatchQueue.main.async {
-                    self.result = decoded
-                    self.isBacktesting = false
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.isBacktesting = false
-                    self.api.errorMessage = "Backtest failed: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-}
-
-struct BacktestResultCard: View {
-    let result: BTCTradingAPI.BacktestResult
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("Backtest Results")
-                .font(.title2)
-                .fontWeight(.bold)
-            
-            // Return Card
-            VStack(spacing: 10) {
-                Text("Total Return")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
-                
-                Text("\(result.total_return, specifier: "%.2f")%")
-                    .font(.system(size: 48, weight: .bold))
-                    .foregroundColor(result.total_return >= 0 ? .green : .red)
-                
-                Text("$10,000 → $\(result.final_capital, specifier: "%.2f")")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(Color(.systemBackground))
-            .cornerRadius(15)
-            .shadow(radius: 5)
-            
-            // Stats Grid
-            LazyVGrid(columns: [
-                GridItem(.flexible()),
-                GridItem(.flexible())
-            ], spacing: 15) {
-                StatBox(label: "Win Rate", value: "\(Int(result.win_rate * 100))%")
-                StatBox(label: "Total Trades", value: "\(result.total_trades)")
-                StatBox(label: "Stop Loss", value: "\(result.sl_hits)")
-                StatBox(label: "Take Profit", value: "\(result.tp_hits)")
-            }
-        }
-    }
-}
-
-struct StatBox: View {
-    let label: String
-    let value: String
-    
-    var body: some View {
-        VStack(spacing: 8) {
-            Text(value)
-                .font(.title2)
-                .fontWeight(.bold)
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding()
-        .background(Color(.systemBackground))
-        .cornerRadius(10)
-        .shadow(radius: 3)
-    }
-}
-
-// ============================================================================
 // MARK: - Preview
-// ============================================================================
 
 struct BTCTradingAppView_Previews: PreviewProvider {
     static var previews: some View {
