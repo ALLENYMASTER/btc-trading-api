@@ -14,6 +14,7 @@ import asyncio
 from datetime import datetime
 import json
 from pathlib import Path
+from aioapns import APNs, NotificationRequest
 
 # Import your existing trading system components
 import sys
@@ -396,6 +397,29 @@ async def run_backtest(request: BacktestRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+async def send_silent_push(device_token: str, signal_data: dict):
+    apns = APNs(
+        key='path/to/key.p8',  # Apple Push Key
+        key_id='YOUR_KEY_ID',
+        team_id='YOUR_TEAM_ID',
+        topic='com.yourapp.btctrading',
+        use_sandbox=False
+    )
+    
+    request = NotificationRequest(
+        device_token=device_token,
+        message={
+            "aps": {
+                "content-available": 1,  # silent push
+                "sound": "",
+                "badge": 0
+            },
+            "signal": signal_data
+        }
+    )
+    
+    await apns.send_notification(request)
+    
 # ============================================================================
 # Server Startup
 # ============================================================================
